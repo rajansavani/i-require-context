@@ -7,6 +7,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+
 @dataclass(frozen=True)
 class Settings:
     # discord
@@ -43,6 +44,7 @@ def _require_env(name: str) -> str:
         )
     return value
 
+
 def _get_int(name: str, default: int, *, min_value: Optional[int] = None) -> int:
     raw = os.getenv(name, str(default)).strip()
     try:
@@ -55,7 +57,8 @@ def _get_int(name: str, default: int, *, min_value: Optional[int] = None) -> int
     
     return value
 
-def _get_settings() -> Settings:
+
+def get_settings() -> Settings:
     """
     Loads env vars once and caches them.
 
@@ -65,7 +68,7 @@ def _get_settings() -> Settings:
     if _CACHED is not None:
         return _CACHED
     
-    # load .env into envrionment if present
+    # load .env into environment if present
     load_dotenv()
 
     outputs_dir = Path("outputs")
