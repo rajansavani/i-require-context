@@ -1,0 +1,25 @@
+# discord bot + voice
+py-cord[voice]
+
+# config
+python-dotenv
+
+# storage + schemas
+pydantic
+sqlalchemy
+
+# llm framework
+langchain
+langgraph
+langchain-openai
+
+# openai sdk (chat + stt)
+openai
+tiktoken
+
+# utilities
+rich
+
+# tests
+pytest
+pytest-asyncio
