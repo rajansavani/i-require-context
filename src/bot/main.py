@@ -5,20 +5,20 @@ import logging
 from pathlib import Path
 
 import discord
-from discord.ext import commands
 
 from src.bot.config import get_settings
 
 
 def _setup_logging() -> None:
+    # simple console logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-
-    # help keep it readable by reducing some noisy loggers
+    
+    # make it readable by dropping noisy logs
     logging.getLogger("discord").setLevel(logging.INFO)
-    logging.getLogger("discord.http").setLevel(logging.WARNING) 
+    logging.getLogger("discord.http").setLevel(logging.WARNING)
 
 
 def _build_intents() -> discord.Intents:
@@ -29,68 +29,30 @@ def _build_intents() -> discord.Intents:
     return intents
 
 
-class IRCBot(commands.Bot):
-    def __init__(self) -> None:
-        self.settings = get_settings()
+def _load_cogs(bot: discord.Bot) -> None:
+    # load all cogs from src/bot/cogs
+    log = logging.getLogger("irc.cogs")
+    cogs_path = Path(__file__).parent / "cogs"
 
-        super().__init__(
-            command_prefix="!", # not used for slash commands, but required by commands.Bot
-            intents=_build_intents(),
-        )
+    if not cogs_path.exists():
+        log.warning("No cogs folder found at %s", cogs_path)
+        return
 
-        self.log = logging.getLogger("irc.bot")
+    loaded = 0
+    for file in sorted(cogs_path.glob("*.py")):
+        if file.name.startswith("_"):
+            continue
 
-    async def setup_hook(self) -> None:
-        """
-        Runs before the bot connects to Discord.
-
-        Load cogs and sync slash commands here.
-        """
-        await self._load_cogs()
-
-        # can take awhile without specific guild_id for dev server
-        self.log.info("Syncing application commands (global)...")
+        module = f"src.bot.cogs.{file.stem}"
         try:
-            await self.tree.sync()
-            self.log.info("Slash commands synced.")
+            bot.load_extension(module)
+            loaded += 1
+            log.info("Loaded cog: %s", module)
         except Exception:
-            self.log.exception("Failed to sync slash commands.")
+            log.exception("Failed to load cog: %s", module)
 
-    async def on_ready(self) -> None:
-        # fires when connected and ready
-        user = self.user
-        if user is None:
-            self.log.info("Bot is ready.")
-            return
-        
-        self.log.info("Logged in as %s (id=%s)", user, user.id)
-
-    async def _load_cogs(self) -> None:
-        """
-        Loads all cogs under src/bot/cogs.
-
-        This keeps adding commands simple (just drop in a new cog file).
-        """
-        cogs_path = Path(__file__).parent / "cogs"
-        if not cogs_path.exists():
-            self.log.warning("No cogs folder found at %s", cogs_path)
-            return
-        
-        loaded = 0
-        for file in sorted(cogs_path.glob("*.py")):
-            if file.name.startswith("_"):
-                continue
-
-            module = f"bot.cogs.{file.stem}"
-            try:
-                await self.load_extension(module)
-                loaded += 1
-                self.log.info("Loaded cog: %s", module)
-            except Exception:
-                self.log.exception("Failed to load cog: %s", module)
-
-        if loaded == 0:
-            self.log.warning("No cogs were loaded. Add a cog under src/bot/cogs/ to register commands.")
+    if loaded == 0:
+        log.warning("No cogs were loaded. Add a cog under src/bot/cogs/ to register commands.")
 
 
 async def _main() -> None:
@@ -99,13 +61,27 @@ async def _main() -> None:
     settings = get_settings()
     log = logging.getLogger("irc.main")
 
-    log.info("Starting I Require Context...")
-    log.info("Database: %s", settings.database_url)
-    log.info("Retention: %d hours", settings.retention_hours)
+    bot = discord.Bot(intents=_build_intents())
 
-    bot = IRCBot()
+    _load_cogs(bot)
 
-    # start the bot
+    @bot.event
+    async def on_ready() -> None:
+        if bot.user:
+            log.info("Logged in as %s (id=%s)", bot.user, bot.user.id)
+        else:
+            log.info("Bot is ready.")
+
+    @bot.event
+    async def on_connect() -> None:
+        # syncing here helps ensure commands register after startup
+        log.info("Syncing application commands (global)...")
+        try:
+            await bot.sync_commands()
+            log.info("Slash commands synced.")
+        except Exception:
+            log.exception("Failed to sync slash commands.")
+
     await bot.start(settings.discord_bot_token)
 
 
