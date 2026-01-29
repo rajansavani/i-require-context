@@ -12,6 +12,7 @@ from discord.ext import commands
 
 from src.bot.config import get_settings
 from src.bot.permissions import gate_guild, deny
+from src.bot.artifacts import SessionArtifact, write_session_json
 
 
 @dataclass
@@ -142,6 +143,8 @@ class SessionCog(commands.Cog):
             await ctx.respond("No active recording session found. Use /start first.", ephemeral=True)
             return
 
+        ended_at = time.time()
+
         # stop recording triggers the callback that saves audio
         try:
             session.voice_client.stop_recording()
@@ -156,10 +159,53 @@ class SessionCog(commands.Cog):
         except Exception:
             self.log.exception("Failed to disconnect after recording.")
 
-        duration_s = int(time.time() - session.started_at)
+        # write session.json
+        session_dir = Path("outputs") / "audio" / "sessions" / session.session_id
+        participants = []
+        audio_files = []
+
+        try:
+            if session_dir.exists():
+                for p in sorted(session_dir.glob("*.wav")):
+                    audio_files.append(
+                        {
+                            "filename": p.name,
+                            "bytes": p.stat().st_size,
+                        }
+                    )
+
+            # for now we only store a label based on the filename
+            for f in audio_files:
+                participants.append(
+                    {
+                        "speaker_label": f["filename"].replace(".wav", ""),
+                    }
+                )
+
+            artifact = SessionArtifact(
+                session_id=session.session_id,
+                guild_id=session.guild_id,
+                voice_channel_id=session.voice_channel_id,
+                started_by_user_id=session.started_by_user_id,
+                started_at_unix=session.started_at,
+                ended_at_unix=ended_at,
+                participants=participants,
+                audio_files=audio_files,
+                notes=[
+                    "per-speaker wav files may be voice-activity trimmed; timestamps are not aligned yet",
+                ],
+            )
+
+            write_session_json(session_dir, artifact)
+            self.log.info("Wrote session.json for session %s", session.session_id)
+        except Exception:
+            self.log.exception("Failed to write session.json")
+
+        duration_s = int(ended_at - session.started_at)
         self.active_by_guild.pop(guild.id, None)
 
         await ctx.respond(f"Recording stopped. Duration: **{duration_s}s**.", ephemeral=False)
+
 
     def _save_sink_audio(self, sink: discord.sinks.Sink, base_dir: Path) -> None:
         # writes per-speaker wav buffers from the sink
