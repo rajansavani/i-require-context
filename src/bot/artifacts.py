@@ -8,14 +8,28 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class SessionArtifact:
+    # schema
+    schema_version: int
+
+    # identity
     session_id: str
     guild_id: int
     voice_channel_id: int
     started_by_user_id: int
+
+    # timing
     started_at_unix: float
     ended_at_unix: Optional[float]
+    duration_s: Optional[float]
+
+    # participants + audio
     participants: List[Dict[str, Any]]
     audio_files: List[Dict[str, Any]]
+
+    # other session artifacts produced by the pipeline
+    artifacts: Dict[str, str]
+
+    # notes for debugging
     notes: List[str]
 
 
@@ -30,7 +44,6 @@ def write_session_json(
 
     path = base_dir / filename
     payload = asdict(artifact)
-
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
 

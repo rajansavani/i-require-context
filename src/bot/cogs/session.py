@@ -8,7 +8,7 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -171,31 +171,61 @@ class SessionCog(commands.Cog):
         except Exception:
             self.log.exception("Failed to disconnect after recording.")
 
-        # write session.json
         session_dir = Path("outputs") / "audio" / "sessions" / session.session_id
-        participants: List[Dict[str, Any]] = []
-        audio_files: List[Dict[str, Any]] = []
 
+        # build participants + audio files from audio_index.json so we keep durations + user ids
         try:
+            participants, audio_files = _build_session_manifest_from_audio_index(
+                guild=guild,
+                session_dir=session_dir,
+            )
+        except Exception:
+            self.log.exception("Failed to build manifest from audio_index.json; falling back to filenames.")
+            participants = []
+            audio_files = []
+
             if session_dir.exists():
                 for p in sorted(session_dir.glob("*.wav")):
-                    audio_files.append({"filename": p.name, "bytes": p.stat().st_size})
+                    label = p.name.replace(".wav", "")
+                    audio_files.append(
+                        {
+                            "filename": p.name,
+                            "bytes": p.stat().st_size,
+                            "user_id": None,
+                            "speaker_label": label,
+                            "duration_s": None,
+                        }
+                    )
+                    participants.append(
+                        {
+                            "user_id": None,
+                            "speaker_label": label,
+                            "display_name": None,
+                        }
+                    )
 
-            for f in audio_files:
-                participants.append({"speaker_label": f["filename"].replace(".wav", "")})
-
+        # write session.json using the new artifact schema
+        try:
             artifact = SessionArtifact(
+                schema_version=1,
                 session_id=session.session_id,
                 guild_id=session.guild_id,
                 voice_channel_id=session.voice_channel_id,
                 started_by_user_id=session.started_by_user_id,
                 started_at_unix=session.started_at,
                 ended_at_unix=ended_at,
+                duration_s=(ended_at - session.started_at),
                 participants=participants,
                 audio_files=audio_files,
+                artifacts={
+                    "session": "session.json",
+                    "audio_index": "audio_index.json",
+                    "transcripts": "transcripts.json",
+                    "chunks": "chunks.json",
+                },
                 notes=[
-                    "per-speaker wav files may be voice-activity trimmed; timestamps are not aligned yet",
-                    "audio_index.json contains per-file wav durations (header repaired if needed)",
+                    "per-speaker wav files may be packet-trimmed; timeline alignment requires chunking or raw timestamps",
+                    "wav headers may be repaired on write to ensure correct durations",
                 ],
             )
 
@@ -204,10 +234,10 @@ class SessionCog(commands.Cog):
         except Exception:
             self.log.exception("Failed to write session.json")
 
-        duration_s = int(ended_at - session.started_at)
+        duration_s_int = int(ended_at - session.started_at)
         self.active_by_guild.pop(guild.id, None)
 
-        await ctx.respond(f"Recording stopped. Duration: **{duration_s}s**.", ephemeral=False)
+        await ctx.respond(f"Recording stopped. Duration: **{duration_s_int}s**.", ephemeral=False)
 
     def _save_sink_audio(self, sink: discord.sinks.Sink, base_dir: Path) -> None:
         audio_data = getattr(sink, "audio_data", None)
@@ -367,7 +397,6 @@ def _repair_wav_header_if_needed(path: Path) -> bool:
         return False
 
     # walk chunks to find data chunk offset + declared size
-    # riff header is 12 bytes, then repeated: 4-byte id + 4-byte size + payload (padded to even)
     pos = 12
     data_chunk_size_offset: Optional[int] = None
     data_payload_offset: Optional[int] = None
@@ -401,12 +430,79 @@ def _repair_wav_header_if_needed(path: Path) -> bool:
     if declared_data_size not in (0, None):
         return False
 
-    # patch riff size (file size - 8) and data chunk size (actual payload bytes)
+    # patch riff size and data chunk size
     patched = bytearray(data)
     struct.pack_into("<I", patched, 4, len(data) - 8)
     struct.pack_into("<I", patched, data_chunk_size_offset, actual_data_size)
     path.write_bytes(patched)
     return True
+
+
+def _load_audio_index(session_dir: Path) -> Dict[str, Any]:
+    path = session_dir / "audio_index.json"
+    if not path.exists():
+        return {"items": []}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _build_session_manifest_from_audio_index(
+    *,
+    guild: discord.Guild,
+    session_dir: Path,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    audio_index = _load_audio_index(session_dir)
+    items = audio_index.get("items", [])
+
+    participants: List[Dict[str, Any]] = []
+    audio_files: List[Dict[str, Any]] = []
+
+    seen_user_ids: set[int] = set()
+
+    for it in items:
+        user_id = it.get("user_id")
+        label = it.get("label")
+        filename = it.get("filename")
+        size_bytes = it.get("bytes")
+        wav = it.get("wav") or {}
+        duration_s = wav.get("duration_s")
+
+        audio_files.append(
+            {
+                "filename": filename,
+                "bytes": size_bytes,
+                "user_id": user_id,
+                "speaker_label": label,
+                "duration_s": duration_s,
+            }
+        )
+
+        if isinstance(user_id, int) and user_id not in seen_user_ids:
+            seen_user_ids.add(user_id)
+            member = guild.get_member(user_id)
+            display_name = member.display_name if member else None
+
+            participants.append(
+                {
+                    "user_id": user_id,
+                    "speaker_label": label,
+                    "display_name": display_name,
+                }
+            )
+
+    # for unknown users still register them
+    for it in items:
+        user_id = it.get("user_id")
+        label = it.get("label")
+        if user_id is None:
+            participants.append(
+                {
+                    "user_id": None,
+                    "speaker_label": label,
+                    "display_name": None,
+                }
+            )
+
+    return participants, audio_files
 
 
 def setup(bot: discord.Bot) -> None:
